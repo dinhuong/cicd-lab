@@ -1,0 +1,46 @@
+pipeline {
+    agent any
+    environment {
+        HARBOR_URL = "harbor.cicd.local:30002"
+        IMAGE_NAME = "library/demo-app"
+        MANIFEST_REPO = "git@github.com:yourorg/app-manifests.git"
+        DEPLOY_PATH = "base/deployment.yaml"
+    }
+    stages {
+        stage('Checkout Code') {
+            steps {
+                checkout scm
+                script {
+                    COMMIT_SHORT = sh(returnStdout: true, script: "git rev-parse --short HEAD").trim()
+                    IMAGE_TAG = "${COMMIT_SHORT}"
+                }
+            }
+        }
+        stage('Build & Push Image') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'harbor-cred', usernameVariable: 'H_USER', passwordVariable: 'H_PASS')]) {
+                    sh """
+                        echo $H_PASS | docker login ${HARBOR_URL} -u $H_USER --password-stdin
+                        docker build -t ${HARBOR_URL}/${IMAGE_NAME}:${IMAGE_TAG} .
+                        docker push ${HARBOR_URL}/${IMAGE_NAME}:${IMAGE_TAG}
+                    """
+                }
+            }
+        }
+        stage('Update Manifests') {
+            steps {
+                dir('manifests-repo') {
+                    git credentialsId: 'git-ssh-key', url: "${MANIFEST_REPO}"
+                    sh """
+                        sed -i 's|image: .*|image: ${HARBOR_URL}/${IMAGE_NAME}:${IMAGE_TAG}|' ${DEPLOY_PATH}
+                        git config user.email 'jenkins@ci'
+                        git config user.name 'jenkins'
+                        git add ${DEPLOY_PATH}
+                        git commit -m "ci: update image to ${IMAGE_TAG}" || true
+                        git push origin main
+                    """
+                }
+            }
+        }
+    }
+}
